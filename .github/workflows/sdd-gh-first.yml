@@ -1,0 +1,266 @@
+name: SDD GitHub-first
+
+on:
+  issues:
+    types: [labeled]
+
+# Une seule exécution à la fois par Issue.
+concurrency:
+  group: sdd-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+env:
+  GEMINI_CLI_VERSION: "0.65.0"
+  SPECKIT_REF: "27d14e20c187c1f2916540ea201ecbdc9f8ed588"   # commit de la version de Spec Kit installée (specify version)
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Exécution A : cadrage (label « sdd-spec »)
+  # ---------------------------------------------------------------------
+  cadrage:
+    if: >-
+      github.event.label.name == 'sdd-spec' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vérifier la configuration
+        run: |
+          if [ -z "$SPECKIT_REF" ]; then
+            echo "Renseigne SPECKIT_REF (version de Spec Kit) en tête du workflow." >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      # Le cadrage n'installe pas les dépendances du projet : aucun script de paquet n'est exécuté ici.
+      - name: Installer les outils
+        run: |
+          python -m pip install --upgrade pip uv
+          npm install -g "@google/gemini-cli@${GEMINI_CLI_VERSION}"
+          uv tool install specify-cli --from "git+https://github.com/github/spec-kit.git@${SPECKIT_REF}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Créer la branche de l'Issue
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          BRANCH="sdd/issue-${ISSUE_NUMBER}"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "La branche $BRANCH existe déjà : supprime-la ou reprends le travail dessus." >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+
+      - name: Cadrage SDD (Specify, Clarify, Plan, Tasks, Analyze)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_CLI_TRUST_WORKSPACE: "true"
+          SPECKIT_INTEGRATION_GEMINI_EXTRA_ARGS: "--approval-mode=yolo"
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          SPEC_TEXT="$(printf '%s\n\n%s' "$ISSUE_TITLE" "$ISSUE_BODY")"
+          specify workflow run workflows/sdd/cadrage.yml -i spec="$SPEC_TEXT" -i integration=gemini
+
+      - name: Publier la branche
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          git status --short
+          git add -A -- specs
+          if git diff --cached --quiet; then
+            echo "Aucun fichier de spécification produit." >&2
+            exit 1
+          fi
+          git commit -m "sdd: cadrage de l'Issue #${ISSUE_NUMBER}"
+          git push origin "HEAD:refs/heads/sdd/issue-${ISSUE_NUMBER}"
+
+      - name: Ouvrir la PR brouillon et prévenir sur l'Issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          printf '%s\n' \
+            "Cadrage SDD généré pour l'Issue #${ISSUE_NUMBER}." \
+            "" \
+            "**Validation humaine n°1** : relis les fichiers sous \`specs/\`, en particulier \`spec.md\` et \`clarifications.md\`." \
+            "Pour répondre aux questions de clarification ou corriger la spec, modifie les fichiers directement sur cette branche." \
+            "**Ne fusionne pas cette PR avant la fin de l'implémentation** (elle recevra le code après le label \`sdd-approved\`)." \
+            "Quand tout te convient, pose le label \`sdd-approved\` sur l'Issue pour lancer l'implémentation." \
+            > /tmp/pr-body.md
+          PR_URL="$(gh pr create --draft --base main --head "sdd/issue-${ISSUE_NUMBER}" \
+            --title "[SDD] ${ISSUE_TITLE}" --body-file /tmp/pr-body.md)"
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "Cadrage terminé. PR brouillon : ${PR_URL}. Relis la spec puis pose le label \`sdd-approved\`."
+
+  # ---------------------------------------------------------------------
+  # Exécution B : réalisation (label « sdd-approved »)
+  # ---------------------------------------------------------------------
+  realisation:
+    if: >-
+      github.event.label.name == 'sdd-approved' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: sdd/issue-${{ github.event.issue.number }}
+          fetch-depth: 0
+
+      - name: Vérifier la configuration
+        run: |
+          if [ -z "$SPECKIT_REF" ]; then
+            echo "Renseigne SPECKIT_REF (version de Spec Kit) en tête du workflow." >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Installer les outils
+        run: |
+          python -m pip install --upgrade pip uv
+          npm install -g "@google/gemini-cli@${GEMINI_CLI_VERSION}"
+          uv tool install specify-cli --from "git+https://github.com/github/spec-kit.git@${SPECKIT_REF}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Installer les dépendances du projet
+        run: npm ci
+
+      - name: Désigner la feature (d'après le commit de cadrage de l'Issue)
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          COMMIT="$(git log --format=%H -n1 --grep="^sdd: cadrage de l'Issue #${ISSUE_NUMBER}$")"
+          if [ -z "$COMMIT" ]; then
+            echo "Commit de cadrage de l'Issue #${ISSUE_NUMBER} introuvable sur la branche." >&2
+            exit 1
+          fi
+          DIRS="$(git show --name-only --format= "$COMMIT" | grep '^specs/' | cut -d/ -f1-2 | sort -u)"
+          if [ "$(printf '%s\n' "$DIRS" | grep -c .)" -ne 1 ]; then
+            echo "Une seule feature attendue dans le commit de cadrage, trouvé : $DIRS" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$DIRS" | grep -Eq '^specs/[0-9]{3}-[a-z0-9-]+$'; then
+            echo "Nom de dossier inattendu : $DIRS" >&2
+            exit 1
+          fi
+          printf '{"feature_directory": "%s"}\n' "$DIRS" > .specify/feature.json
+          cat .specify/feature.json
+
+      - name: Réalisation SDD (Implement, vérification, Converge)
+        id: realisation
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_CLI_TRUST_WORKSPACE: "true"
+          SPECKIT_INTEGRATION_GEMINI_EXTRA_ARGS: "--approval-mode=yolo"
+        run: |
+          set +e
+          specify workflow run workflows/sdd/realisation.yml \
+            -i integration=gemini -i test_cmd="npm run typecheck && npm test"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Publier le code produit, même si la vérification est rouge
+        id: publish
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git status --short
+          git add -A -- . ':!reports'
+          if git diff --cached --quiet; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "sdd: première version du code (Issue #${ISSUE_NUMBER})"
+            git push origin "HEAD:refs/heads/sdd/issue-${ISSUE_NUMBER}"
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: S'assurer qu'une PR brouillon est ouverte
+        id: ensurepr
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          BRANCH="sdd/issue-${ISSUE_NUMBER}"
+          EXISTING="$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
+          if [ -z "$EXISTING" ]; then
+            printf '%s\n' "PR brouillon recréée pour l'Issue #${ISSUE_NUMBER} : la PR précédente avait été fermée ou fusionnée avant l'implémentation." > /tmp/pr-body2.md
+            NEW="$(gh pr create --draft --base main --head "$BRANCH" --title "[SDD] Issue #${ISSUE_NUMBER} : première version du code" --body-file /tmp/pr-body2.md)"
+            gh issue comment "$ISSUE_NUMBER" --body "Nouvelle PR brouillon : ${NEW}"
+          fi
+
+      - name: Rapport sur l'Issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          STATUS: ${{ steps.realisation.outputs.status }}
+          PUSHED: ${{ steps.publish.outputs.pushed }}
+          PR_OUTCOME: ${{ steps.ensurepr.outcome }}
+        run: |
+          d="$(python3 -c "import json; print(json.load(open('.specify/feature.json'))['feature_directory'])")"
+          DONE="$(grep -c '^- \[[xX]\] T[0-9]' "$d/tasks.md" || true)"
+          TODO="$(grep -c '^- \[ \] T[0-9]' "$d/tasks.md" || true)"
+          if [ "$STATUS" = "0" ] && [ "$PUSHED" = "true" ]; then
+            HEAD_MSG="Première version du code poussée, types et tests au vert."
+          elif [ "$PUSHED" = "true" ]; then
+            HEAD_MSG="Code poussé, mais le workflow s'est arrêté en échec (types, tests ou contrôle non passé) : intervention humaine requise."
+          else
+            HEAD_MSG="Aucune modification de code produite : intervention humaine requise."
+          fi
+          {
+            echo "$HEAD_MSG"
+            echo
+            if [ "$PR_OUTCOME" != "success" ]; then
+              echo "Attention : la PR brouillon n'a pas pu être créée ou vérifiée."
+              echo
+            fi
+            echo "Tâches cochées : $DONE ; restantes : $TODO"
+            echo
+            echo '```'
+            tail -n 15 reports/test-report.txt 2>/dev/null || echo "pas de rapport de vérification"
+            echo '```'
+            echo
+            echo "La PR reste en brouillon : passe-la en « Ready for review » après ta relecture."
+          } > /tmp/report.md
+          gh issue comment "$ISSUE_NUMBER" --body-file /tmp/report.md
+
+      - name: Verdict
+        env:
+          STATUS: ${{ steps.realisation.outputs.status }}
+          PUSHED: ${{ steps.publish.outputs.pushed }}
+          PR_OUTCOME: ${{ steps.ensurepr.outcome }}
+        run: |
+          if [ "$STATUS" != "0" ] || [ "$PUSHED" != "true" ] || [ "$PR_OUTCOME" != "success" ]; then
+            echo "Exécution en échec : voir le commentaire sur l'Issue." >&2
+            exit 1
+          fi
