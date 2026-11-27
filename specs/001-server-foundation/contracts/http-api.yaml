@@ -1,0 +1,80 @@
+openapi: 3.1.0
+info:
+  title: API Socle Serveur 20H-FLE
+  description: Contrat d'interface HTTP du socle minimal de l'application 20H-FLE (FR-003, FR-004, FR-005).
+  version: 1.0.0
+paths:
+  /:
+    get:
+      summary: Consultation de la page d'accueil (FR-003, User Story 1)
+      description: Retourne un document HTML5 valide avec l'attribut de langue française et le titre 20H-FLE.
+      responses:
+        '200':
+          description: Page d'accueil servie en SSR avec succès.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: text/html; charset=utf-8
+          content:
+            text/html:
+              schema:
+                type: string
+                example: '<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>20H-FLE</title></head><body><h1>20H-FLE</h1></body></html>'
+
+  /health:
+    get:
+      summary: Sonde de santé du service (FR-004, User Story 2)
+      description: Retourne l'état opérationnel du serveur sous forme de JSON, sans mise en cache possible.
+      responses:
+        '200':
+          description: Le serveur est disponible et fonctionnel.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: application/json; charset=utf-8
+            Cache-Control:
+              schema:
+                type: string
+                example: no-cache, no-store, must-revalidate
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                required:
+                  - status
+                example:
+                  status: ok
+
+  /{unknownPath}:
+    get:
+      summary: Gestion des routes non trouvées (FR-005, User Story 3)
+      description: Capture toute URL ou méthode non reconnue et répond 404 selon la négociation de contenu sans fuite technique.
+      parameters:
+        - name: unknownPath
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '404':
+          description: Ressource introuvable.
+          content:
+            text/html:
+              schema:
+                type: string
+                example: '<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Page non trouvée - 20H-FLE</title></head><body><h1>Page non trouvée</h1><p>La ressource demandée n&apos;existe pas.</p></body></html>'
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Ressource non trouvée
+                required:
+                  - error
